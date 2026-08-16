@@ -1,14 +1,35 @@
-import expres from "express"
-import dotenv from "dotenv"
+import express from "express";
+import dotenv from "dotenv";
+import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
+import cors from "cors";
+import { auth } from "./lib/auth.js";
 
 dotenv.config();
 
-const app = expres();
+const app = express();
 
-app.get("/hello",(req,res)=>{
-    res.send("Hello from server")
-})
+app.use(
+  cors({
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  })
+);
 
-app.listen(process.env.PORT,()=>{
-    console.log(`Your Application is Running on http://localhost:${process.env.PORT}`)
-})
+app.all("/api/auth/*splat", toNodeHandler(auth));
+app.use(express.json());
+
+app.get("/api/me", async (req, res) => {
+  const session = await auth.api.getSession({
+    headers: fromNodeHeaders(req.headers),
+  });
+  return res.json(session);
+});
+
+app.get("/hello", (req, res) => {
+  res.send("Hello from server");
+});
+
+app.listen(process.env.PORT, () => {
+  console.log(`Your Application is Running on http://localhost:${process.env.PORT}`);
+});
