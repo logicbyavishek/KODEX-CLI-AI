@@ -33,7 +33,8 @@ const onLogin = async()=>{
   setIsLoading(true);
   await authClient.signIn.social({
     provider: "github",
-    callbackURL: "http://localhost:3000"
+    callbackURL: process.env.NEXT_PUBLIC_CLIENT_ORIGIN || "http://localhost:3000",
+    errorCallbackURL: `${process.env.NEXT_PUBLIC_CLIENT_ORIGIN || "http://localhost:3000"}/sign-in`
   })
   setIsLoading(false);
 }
@@ -54,10 +55,8 @@ const onLogin = async()=>{
                 variant={"outline"}
                 className="w-full h-full"
                 type="button"
-                onClick={() => authClient.signIn.social({
-                  provider: "github",
-                  callbackURL: "http://localhost:3000"
-                })}
+                onClick={onLogin}
+                disabled={isLoading}
               >
                 <DiGithubBadge className="size-4" />
                 Continue With GitHub
