@@ -77,5 +77,6 @@ const wakeUpAction = async () => {
 };
 
 export const wakeUp = new Command("wakeup")
+  .alias("wakeUp")
   .description("Wake up the AI")
   .action(wakeUpAction);
