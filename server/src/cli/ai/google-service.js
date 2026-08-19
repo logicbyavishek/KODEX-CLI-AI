@@ -9,9 +9,14 @@ export class AIService {
       throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set in environment variables");
     }
     
-    this.model = google(config.model, {
+    this.modelName = config.model;
+    this.model = google(this.modelName, {
       apiKey: config.googleApiKey,
     });
+
+    this.fallbackModel = config.fallbackModel && config.fallbackModel !== this.modelName
+      ? google(config.fallbackModel, { apiKey: config.googleApiKey })
+      : null;
   }
 
   /**
@@ -24,71 +29,102 @@ export class AIService {
    */
   async sendMessage(messages, onChunk, tools = undefined, onToolCall = null) {
     try {
-      const streamConfig = {
-        model: this.model,
-        messages: messages,
-        temperature: config.temperature,
-        maxTokens: config.maxTokens,
-      };
-
-      // Add tools if provided with maxSteps for multi-step tool calling
-      if (tools && Object.keys(tools).length > 0) {
-        streamConfig.tools = tools;
-        streamConfig.maxSteps = 5; // Allow up to 5 tool call steps
-        
-        console.log(chalk.gray(`[DEBUG] Tools enabled: ${Object.keys(tools).join(', ')}`));
+      return await this.streamWithModel(this.model, messages, onChunk, tools, onToolCall);
+    } catch (error) {
+      if (!this.fallbackModel || !this.isQuotaError(error)) {
+        throw this.toServiceError(error);
       }
 
-      const result = streamText(streamConfig);
+      console.warn(chalk.yellow(`Primary model quota reached; retrying with ${config.fallbackModel}.`));
+      try {
+        return await this.streamWithModel(this.fallbackModel, messages, onChunk, tools, onToolCall);
+      } catch (fallbackError) {
+        throw this.toServiceError(fallbackError);
+      }
+    }
+  }
+
+  async streamWithModel(model, messages, onChunk, tools, onToolCall) {
+    const streamConfig = {
+      model,
+      messages,
+      temperature: config.temperature,
+      maxTokens: config.maxTokens,
+      maxRetries: config.maxRetries,
+      onError: () => {},
+    };
+
+    if (tools && Object.keys(tools).length > 0) {
+      streamConfig.tools = tools;
+      streamConfig.maxSteps = 5;
+      console.log(chalk.gray(`[DEBUG] Tools enabled: ${Object.keys(tools).join(', ')}`));
+    }
+
+    const result = streamText(streamConfig);
+    let fullResponse = "";
       
-      let fullResponse = "";
-      
-      // Stream text chunks
-      for await (const chunk of result.textStream) {
-        fullResponse += chunk;
+    // Consume the full stream so provider errors are handled by this service.
+    for await (const chunk of result.fullStream) {
+      if (chunk.type === "error") {
+        throw chunk.error;
+      }
+
+      if (chunk.type === "text-delta") {
+        fullResponse += chunk.text;
         if (onChunk) {
-          onChunk(chunk);
+          onChunk(chunk.text);
         }
       }
+    }
 
-      // IMPORTANT: Await the result to get access to steps, toolCalls, etc.
-      const fullResult = await result;
+    // IMPORTANT: Await the result to get access to steps, toolCalls, etc.
+    const fullResult = await result;
       
-      const toolCalls = [];
-      const toolResults = [];
+    const toolCalls = [];
+    const toolResults = [];
       
-      // Collect tool calls from all steps (if they exist)
-      if (fullResult.steps && Array.isArray(fullResult.steps)) {
-        for (const step of fullResult.steps) {
-          if (step.toolCalls && step.toolCalls.length > 0) {
-            for (const toolCall of step.toolCalls) {
-              toolCalls.push(toolCall);
-              if (onToolCall) {
-                onToolCall(toolCall);
-              }
+    // Collect tool calls from all steps (if they exist)
+    if (fullResult.steps && Array.isArray(fullResult.steps)) {
+      for (const step of fullResult.steps) {
+        if (step.toolCalls && step.toolCalls.length > 0) {
+          for (const toolCall of step.toolCalls) {
+            toolCalls.push(toolCall);
+            if (onToolCall) {
+              onToolCall(toolCall);
             }
           }
-          
-          // Collect tool results
-          if (step.toolResults && step.toolResults.length > 0) {
-            toolResults.push(...step.toolResults);
-          }
+        }
+
+        // Collect tool results
+        if (step.toolResults && step.toolResults.length > 0) {
+          toolResults.push(...step.toolResults);
         }
       }
-
-      return {
-        content: fullResponse,
-        finishReason: fullResult.finishReason,
-        usage: fullResult.usage,
-        toolCalls,
-        toolResults,
-        steps: fullResult.steps,
-      };
-    } catch (error) {
-      console.error(chalk.red("AI Service Error:"), error.message);
-      console.error(chalk.red("Full error:"), error);
-      throw error;
     }
+
+    return {
+      content: fullResponse,
+      finishReason: fullResult.finishReason,
+      usage: fullResult.usage,
+      toolCalls,
+      toolResults,
+      steps: fullResult.steps,
+    };
+  }
+
+  isQuotaError(error) {
+    const nestedErrors = [error, error?.lastError, ...(Array.isArray(error?.errors) ? error.errors : [])];
+    return nestedErrors.some((candidate) => candidate?.statusCode === 429 || /quota|rate limit|resource exhausted/i.test(candidate?.message || ""));
+  }
+
+  toServiceError(error) {
+    const nestedErrors = [error, error?.lastError, ...(Array.isArray(error?.errors) ? error.errors : [])];
+    const providerError = nestedErrors.find((candidate) => candidate?.statusCode);
+    const message = providerError?.message || error?.message || "The AI provider returned an unknown error.";
+    const serviceError = new Error(message);
+    serviceError.statusCode = providerError?.statusCode || error?.statusCode;
+    console.error(chalk.red("AI Service Error:"), message);
+    return serviceError;
   }
 
   /**

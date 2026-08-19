@@ -334,9 +334,16 @@ async function chatLoop(conversation) {
 
     await saveMessage(conversation.id, "user", userInput);
     const messages = await chatService.getMessages(conversation.id);
-    const aiResponse = await getAIResponse(conversation.id);
-    await saveMessage(conversation.id, "assistant", aiResponse);
-    await updateConversationTitle(conversation.id, userInput, messages.length);
+    try {
+      const aiResponse = await getAIResponse(conversation.id);
+      await saveMessage(conversation.id, "assistant", aiResponse);
+      await updateConversationTitle(conversation.id, userInput, messages.length);
+    } catch (error) {
+      const message = error?.statusCode === 429 || /quota|rate limit|resource exhausted/i.test(error?.message || "")
+        ? "Google AI quota is exhausted. Check your Google AI billing and rate limits, then try again."
+        : `Unable to get an AI response: ${error.message}`;
+      console.log(chalk.yellow(`\n⚠️  ${message}\n`));
+    }
   }
 }
 
